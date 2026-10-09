@@ -1,276 +1,82 @@
-name: Build PUBG Mobile Mod APK
-
-on:
-  workflow_dispatch:
-    inputs:
-      apk_url:
-        description: 'Direct URL to original PUBG Mobile APK (64-bit)'
-        required: true
-        type: string
-      keystore_pass:
-        description: 'Keystore password (optional, will generate if empty)'
-        required: false
-        type: string
-        default: ''
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install NDK
-        run: |
-          SDKMGR=$(find /usr/local/lib/android/sdk -name sdkmanager -type f | head -1)
-          echo "Found sdkmanager at: $SDKMGR"
-
-          yes | $SDKMGR --licenses > /dev/null 2>&1 || true
-
-          $SDKMGR "ndk;26.3.11579264"
-
-          NDK_PATH="/usr/local/lib/android/sdk/ndk/26.3.11579264"
-          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
-          echo "NDK_PATH=$NDK_PATH" >> $GITHUB_ENV
-
-          echo "Installed NDK versions:"
-          ls /usr/local/lib/android/sdk/ndk/
-
       - name: Download original APK
         run: |
-          wget -q "${{ inputs.apk_url }}" -O original.apk
+          UA="Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+          download_apk() {
+            local url="$1"
+            echo "Trying: $url"
+            curl -L -sS --fail \
+              -H "User-Agent: $UA" \
+              -H "Referer: https://apkpure.com/" \
+              -H "Accept: application/vnd.android.package-archive,*/*" \
+              --connect-timeout 30 \
+              --max-time 900 \
+              -o original.bin "$url" || return 1
+
+            # Check magic bytes: APK = PK (zip), XAPK/APKM = PK too, HTML = fail
+            MAGIC=$(head -c 2 original.bin)
+            echo "Magic bytes: $MAGIC"
+            [ "$MAGIC" = "PK" ] && return 0
+            return 1
+          }
+
+          # Try sources in order
+          SOURCES=(
+            "${{ inputs.apk_url }}"
+            "https://d.apkpure.com/b/XAPK/com.tencent.ig?versionCode=21518"
+            "https://d.apkpure.net/b/APK/com.tencent.ig?versionCode=21518"
+            "https://download.apkpure.one/com.tencent.ig?versionCode=21518"
+          )
+
+          SUCCESS=0
+          for url in "${SOURCES[@]}"; do
+            [ -z "$url" ] && continue
+            if download_apk "$url"; then
+              SUCCESS=1
+              echo "Downloaded from: $url"
+              break
+            fi
+          done
+
+          if [ $SUCCESS -eq 0 ]; then
+            echo "::error::Download failed. File content:"
+            head -c 500 original.bin
+            exit 1
+          fi
+
+          # Check if it's XAPK/APKM (zip containing APKs)
+          FILE_TYPE=$(unzip -l original.bin 2>/dev/null | grep -cE "\.(apk)$" || true)
+
+          if [ "$FILE_TYPE" -gt 0 ]; then
+            echo "[*] XAPK/APKM detected, extracting..."
+
+            # List contents
+            unzip -l original.bin
+
+            # Extract the arm64 APK
+            mkdir -p xapk_extract
+            unzip -o original.bin -d xapk_extract
+            ls -la xapk_extract/
+
+            # Find main APK (contains lib/ and classes.dex or is largest)
+            MAIN_APK=""
+            for f in xapk_extract/*.apk; do
+              if unzip -l "$f" 2>/dev/null | grep -q "lib/arm64-v8a/libUE4.so"; then
+                MAIN_APK="$f"
+                break
+              fi
+            done
+
+            # Fallback: take largest APK
+            if [ -z "$MAIN_APK" ]; then
+              MAIN_APK=$(ls -S xapk_extract/*.apk | head -1)
+            fi
+
+            cp "$MAIN_APK" original.apk
+            rm -rf xapk_extract
+          else
+            mv original.bin original.apk
+          fi
+
           ls -la original.apk
           file original.apk
-
-      - name: Build native library
-        run: |
-          cd jni
-          $NDK_PATH/ndk-build \
-              NDK_PROJECT_PATH=. \
-              APP_BUILD_SCRIPT=Android.mk \
-              NDK_APPLICATION_MK=Application.mk
-          ls -la libs/arm64-v8a/
-
-      - name: Decompile APK
-        run: |
-          APKTOOL_VER=2.9.3
-          wget -q "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_${APKTOOL_VER}.jar" -O apktool.jar
-          ls -la apktool.jar
-          java -jar apktool.jar d original.apk -o decompiled --no-res -f
-          ls decompiled/
-
-      - name: Inject Mod into APK
-        run: |
-          cd decompiled
-          mkdir -p lib/arm64-v8a
-          cp ../libs/arm64-v8a/libpmod.so lib/arm64-v8a/
-          mkdir -p smali/com/pubg/mod
-
-          cat > smali/com/pubg/mod/NativeBridge.smali << 'SMALI_EOF'
-          .class public Lcom/pubg/mod/NativeBridge;
-          .super Ljava/lang/Object;
-
-          .method public constructor <init>()V
-              .locals 0
-              invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-              return-void
-          .end method
-
-          .method public static native init()V
-          .end method
-
-          .method public static native setESPEnabled(Z)V
-          .end method
-
-          .method public static native setAimbotEnabled(Z)V
-          .end method
-
-          .method public static native setAimbotFOV(F)V
-          .end method
-
-          .method public static native setAimbotSmoothing(F)V
-          .end method
-
-          .method public static native setAimbotBone(I)V
-          .end method
-
-          .method public static native setAimbotSilent(Z)V
-          .end method
-
-          .method public static native setAimbotVisibleOnly(Z)V
-          .end method
-
-          .method public static native setESPBox(Z)V
-          .end method
-
-          .method public static native setESPSkeleton(Z)V
-          .end method
-
-          .method public static native setESPHealthBar(Z)V
-          .end method
-
-          .method public static native setESPName(Z)V
-          .end method
-
-          .method public static native setESPDistance(Z)V
-          .end method
-
-          .method public static native setESPLine(Z)V
-          .end method
-
-          .method public static native setESPMaxDistance(F)V
-          .end method
-          SMALI_EOF
-
-          cat > smali/com/pubg/mod/Injector.smali << 'SMALI_EOF'
-          .class public Lcom/pubg/mod/Injector;
-          .super Ljava/lang/Object;
-
-          .method public constructor <init>()V
-              .locals 0
-              invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-              return-void
-          .end method
-
-          .method public static load()V
-              .locals 1
-
-              :try_start_0
-              const-string v0, "pmod"
-              invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
-
-              const-string v0, "PMod"
-              const-string v1, "Native library loaded successfully"
-              invoke-static {v0, v1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
-
-              invoke-static {}, Lcom/pubg/mod/NativeBridge;->init()V
-              :try_end_0
-              .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
-
-              return-void
-
-              :catch_0
-              move-exception v0
-              const-string v0, "PMod"
-              const-string v1, "Failed to load native library"
-              invoke-static {v0, v1}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
-
-              return-void
-          .end method
-          SMALI_EOF
-
-      - name: Patch entry point
-        run: |
-          cd decompiled
-          python3 << 'PYTHON_EOF'
-          import os, re
-
-          main_class = None
-          for root, dirs, files in os.walk("smali"):
-              for f in files:
-                  if f.endswith(".smali"):
-                      path = os.path.join(root, f)
-                      with open(path, 'r', errors='ignore') as fh:
-                          content = fh.read()
-                          if ".super Landroid/app/Application;" in content:
-                              main_class = path
-                              break
-              if main_class:
-                  break
-
-          if not main_class:
-              for root, dirs, files in os.walk("smali"):
-                  for f in files:
-                      if "MainActivity" in f and f.endswith(".smali"):
-                          main_class = os.path.join(root, f)
-                          break
-                  if main_class:
-                      break
-
-          if not main_class:
-              print("[-] No main class found, listing candidates:")
-              for root, dirs, files in os.walk("smali"):
-                  for f in files[:5]:
-                      print(os.path.join(root, f))
-              exit(0)
-
-          print(f"[*] Patching: {main_class}")
-          with open(main_class, 'r', errors='ignore') as fh:
-              content = fh.read()
-
-          injection = "    invoke-static {}, Lcom/pubg/mod/Injector;->load()V\n"
-
-          m = re.search(r'(\.method.*attachBaseContext\(Landroid/content/Context;\)V.*?invoke-super \{p0, p1\}, Landroid/app/Application;->attachBaseContext\(Landroid/content/Context;\)V)', content, re.DOTALL)
-          if m:
-              content = content.replace(m.group(1), m.group(1) + injection)
-              print("[+] Injected into attachBaseContext")
-          else:
-              m = re.search(r'(\.method.*onCreate\(\)V.*?invoke-super \{p0\}, Landroid/app/Application;->onCreate\(\)V)', content, re.DOTALL)
-              if m:
-                  content = content.replace(m.group(1), m.group(1) + injection)
-                  print("[+] Injected into Application onCreate")
-              else:
-                  m = re.search(r'(\.method.*onCreate\(Landroid/os/Bundle;\)V.*?invoke-super \{p0, p1\}, Landroid/app/[^;]+;->onCreate\(Landroid/os/Bundle;\)V)', content, re.DOTALL)
-                  if m:
-                      content = content.replace(m.group(1), m.group(1) + injection)
-                      print("[+] Injected into Activity onCreate")
-                  else:
-                      print("[!] Could not auto-inject. Manual check needed.")
-                      print(content[:2000])
-
-          with open(main_class, 'w') as fh:
-              fh.write(content)
-          PYTHON_EOF
-
-      - name: Rebuild APK
-        run: |
-          java -jar apktool.jar b decompiled -o modded_unsigned.apk --use-aapt2
-          ls -la modded_unsigned.apk
-
-      - name: Sign APK
-        run: |
-          if [ -z "${{ inputs.keystore_pass }}" ]; then
-            export STORE_PASS="pmod123456"
-          else
-            export STORE_PASS="${{ inputs.keystore_pass }}"
-          fi
-          echo "STORE_PASS=$STORE_PASS" >> $GITHUB_ENV
-
-          keytool -genkey -v \
-            -keystore signing.keystore \
-            -alias pmod \
-            -keyalg RSA -keysize 2048 \
-            -validity 10000 \
-            -storepass $STORE_PASS \
-            -keypass $STORE_PASS \
-            -dname "CN=PMod, OU=PMod, O=PMod, L=PMod, ST=PMod, C=US"
-
-          BT=$(find /usr/local/lib/android/sdk/build-tools -name zipalign | head -1 | xargs dirname)
-          echo "Build tools: $BT"
-
-          $BT/zipalign -v -p 4 modded_unsigned.apk modded_aligned.apk
-
-          $BT/apksigner sign \
-            --ks signing.keystore \
-            --ks-key-alias pmod \
-            --ks-pass pass:$STORE_PASS \
-            --key-pass pass:$STORE_PASS \
-            --out PUBG_Mobile_PMod_4.6.0_signed.apk \
-            modded_aligned.apk
-
-          $BT/apksigner verify --verbose PUBG_Mobile_PMod_4.6.0_signed.apk
-          ls -la PUBG_Mobile_PMod_4.6.0_signed.apk
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: PUBG-Mobile-PMod-signed
-          path: PUBG_Mobile_PMod_4.6.0_signed.apk
-          retention-days: 30
