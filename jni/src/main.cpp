@@ -20,32 +20,31 @@ static uintptr_t ue4Base = 0;
 static uintptr_t anogsBase = 0;
 static bool initialized = false;
 
-// ── Wait for libUE4.so to load ──
+// Прототипы
+void doWork();
+void applyMiscPatches();
+
 static void* waitForLibraries(void* arg) {
     LOGI("[*] Background thread started, waiting for libraries...");
 
     int attempts = 0;
-    while (attempts < 300) { // 5 min timeout
+    while (attempts < 300) {
         ue4Base = mem::getBase("libUE4.so");
         if (ue4Base != 0) {
-            LOGI("[+] libUE4.so found at: 0x%lx", ue4Base);
+            LOGI("[+] libUE4.so found at: 0x%lx", (unsigned long)ue4Base);
 
             anogsBase = mem::getBase("libanogs.so");
             if (anogsBase != 0) {
-                LOGI("[+] libanogs.so found at: 0x%lx", anogsBase);
+                LOGI("[+] libanogs.so found at: 0x%lx", (unsigned long)anogsBase);
             }
 
-            // Wait for game to fully initialize
             sleep(8);
-
-            // Apply all patches
             doWork();
-
             initialized = true;
             LOGI("[+] All patches applied. Mod is active!");
             break;
         }
-        usleep(1000000); // 1 second
+        usleep(1000000);
         attempts++;
     }
 
@@ -56,82 +55,52 @@ static void* waitForLibraries(void* arg) {
     return nullptr;
 }
 
-// ── Main work function ──
 void doWork() {
     LOGI("[*] Applying patches...");
 
-    // 1. Bypass anti-cheat first
     if (anogsBase != 0) {
         mem::bypassAnogs();
         LOGI("[+] Anti-cheat bypassed");
     }
 
-    // 2. Apply ESP patches
     esp::init();
     LOGI("[+] ESP initialized");
 
-    // 3. Apply Aimbot patches
     aim::init();
     aim::applyAimbotPatch(ue4Base);
     aim::applySilentAim(ue4Base);
     LOGI("[+] Aimbot initialized");
 
-    // 4. Initialize SDK
     sdk::init(ue4Base);
     LOGI("[+] SDK initialized");
 
-    // 5. Apply misc patches
     applyMiscPatches();
     LOGI("[+] Misc patches applied");
 
     LOGI("[*] All done. Mod is fully operational.");
 }
 
-// ── Misc patches (120fps, HDR, etc.) ──
 void applyMiscPatches() {
-    // Unlock 120 FPS
-    mem::patch(ue4Base + OFF_Unlock_120fps, "\x01\x00\xa0\xe1\x1e\xff\x2f\xe1", 8);
-
-    // Unlock HDR
-    mem::patch(ue4Base + OFF_Unlock_Hdr, "\x01\x00\xa0\xe1\x1e\xff\x2f\xe1", 8);
-
-    // iPad View
+    mem::patch(ue4Base + OFF_Unlock_120fps, "\x1F\x20\x03\xD5", 4);
+    mem::patch(ue4Base + OFF_Unlock_Hdr, "\x1F\x20\x03\xD5", 4);
     mem::patch(ue4Base + OFF_Ipad_View, "\x1F\x20\x03\xD5", 4);
-
-    // No Grass/Tree
     mem::patch(ue4Base + OFF_No_Grass_Tree, "\x1F\x20\x03\xD5", 4);
-
-    // Small Crosshair
     mem::patch(ue4Base + OFF_SmallCross, "\x1F\x20\x03\xD5", 4);
-
-    // Reduced Recoil
     mem::patch(ue4Base + OFF_Recoil_Small, "\x1F\x20\x03\xD5", 4);
-
-    // Ping Fix
     mem::patch(ue4Base + OFF_Ping_Fix, "\x1F\x20\x03\xD5", 4);
-
-    // Flash Speed Fix
     mem::patch(ue4Base + OFF_Flash_Speed, "\x1F\x20\x03\xD5", 4);
     mem::patch(ue4Base + OFF_Flash_Speed2, "\x1F\x20\x03\xD5", 4);
-
-    // Fix Stuck
     mem::patch(ue4Base + OFF_Fix_Stuck, "\x1F\x20\x03\xD5", 4);
-
-    // Termination Fix
     mem::patch(ue4Base + OFF_Termination_Fix_1, "\x1F\x20\x03\xD5", 4);
     mem::patch(ue4Base + OFF_Termination_Fix_2, "\x1F\x20\x03\xD5", 4);
-
-    // 6 Hour Fix
     mem::patch(ue4Base + OFF_6Hr_TimeFix, "\x1F\x20\x03\xD5", 4);
 }
 
-// ── JNI entry point ──
 extern "C" {
 
     JNIEXPORT void JNICALL
     Java_com_pubg_mod_NativeBridge_init(JNIEnv* env, jobject thiz) {
         LOGI("[*] Native library loaded");
-
         pthread_t thread;
         pthread_create(&thread, nullptr, waitForLibraries, nullptr);
         pthread_detach(thread);
