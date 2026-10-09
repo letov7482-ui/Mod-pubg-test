@@ -19,52 +19,7 @@ namespace sdk {
         u32 Number;
     };
 
-    struct UActorComponent : public UObject {
-        u8 pad[0x08];            // 0x0028
-        void* OwnerPrivate;      // 0x0030
-    };
-
-    struct USceneComponent : public UActorComponent {
-        u8 pad[0x280];           // to 0x02B4
-        FVector RelativeLocation; // 0x02B4 (offset from base)
-        // ... more fields
-    };
-
-    struct UPrimitiveComponent : public USceneComponent {
-        // contains mesh data
-    };
-
-    struct USkeletalMeshComponent : public UPrimitiveComponent {
-        // bone array access
-    };
-
-    struct ULocalPlayer : public UObject {
-        void* Controller;        // offset varies
-    };
-
-    struct APlayerController : public UObject {
-        // Contains CameraManager, Pawn, etc.
-    };
-
-    struct APlayerCameraManager : public UObject {
-        // CameraCacheEntry
-    };
-
-    struct APawn : public UObject {
-        // Root component, Health, TeamNum
-    };
-
-    struct ACharacter : public APawn {
-        // Mesh component
-    };
-
-    struct UCanvas : public UObject {
-        // K2_DrawText, K2_DrawLine functions
-    };
-
-    // ── Helper functions (resolved from offsets) ──
-    // These are function pointers we'll resolve at runtime
-
+    // ── Function pointer types ──
     typedef bool (*tProjectWorldLocationToScreen)(void* playerController, FVector& worldPos, FVector2D& screenPos, bool relative);
     typedef bool (*tLineOfSightTo)(void* actor, void* other, FVector viewPoint);
     typedef FVector (*tGetBonePosWithRotation)(void* mesh, int boneIndex);
@@ -73,23 +28,6 @@ namespace sdk {
     typedef FRotator (*tGetCameraRotation)(void* cameraManager);
     typedef FVector (*tGetCameraLocation)(void* cameraManager);
     typedef float (*tGetDistanceTo)(void* from, void* to);
-
-    // FLinearColor
-    struct FLinearColor {
-        float R, G, B, A;
-        FLinearColor() : R(0), G(0), B(0), A(1) {}
-        FLinearColor(float r, float g, float b, float a) : R(r), G(g), B(b), A(a) {}
-
-        static FLinearColor Red()    { return {1.0f, 0.0f, 0.0f, 1.0f}; }
-        static FLinearColor Green()  { return {0.0f, 1.0f, 0.0f, 1.0f}; }
-        static FLinearColor Blue()   { return {0.0f, 0.0f, 1.0f, 1.0f}; }
-        static FLinearColor Yellow() { return {1.0f, 1.0f, 0.0f, 1.0f}; }
-        static FLinearColor White()  { return {1.0f, 1.0f, 1.0f, 1.0f}; }
-        static FLinearColor Cyan()   { return {0.0f, 1.0f, 1.0f, 1.0f}; }
-        static FLinearColor Purple() { return {0.5f, 0.0f, 0.5f, 1.0f}; }
-        static FLinearColor Orange() { return {1.0f, 0.5f, 0.0f, 1.0f}; }
-        static FLinearColor Pink()   { return {1.0f, 0.4f, 0.7f, 1.0f}; }
-    };
 
     // ── Resolved function pointers ──
     extern tProjectWorldLocationToScreen ProjectWorldLocationToScreen;
@@ -112,7 +50,7 @@ namespace sdk {
     void* getCameraManager();
     void* getCanvas();
     void* getLevel();
-    void* getActors(u32& count);
+    void** getActors(u32& count);
 
     // ── Actor info ──
     bool isPlayer(void* actor);
