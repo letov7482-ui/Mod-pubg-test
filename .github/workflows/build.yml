@@ -29,29 +29,19 @@ jobs:
 
       - name: Install NDK
         run: |
-          # Accept licenses first
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          # Install NDK (runner already has SDK, no setup-android needed)
-          sdkmanager "ndk;26.3.11579264"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
-          echo "NDK installed:"
-          ls $ANDROID_HOME/ndk/
+          SDKMGR=$(find /usr/local/lib/android/sdk -name sdkmanager -type f | head -1)
+          echo "Found sdkmanager at: $SDKMGR"
 
-      - name: Install build tools
-        run: |
-          # zipalign and apksigner are already on runner, verify
-          which zipalign || sdkmanager "build-tools;34.0.0"
-          export PATH=$PATH:$ANDROID_HOME/build-tools/34.0.0
-          which zipalign && which apksigner
-          echo "PATH updated"
+          yes | $SDKMGR --licenses > /dev/null 2>&1 || true
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zipalign apksigner || true
-          # If not in apt, use from build-tools
-          echo "SDK build-tools:"
-          ls $ANDROID_HOME/build-tools/ 2>/dev/null || echo "none"
+          $SDKMGR "ndk;26.3.11579264"
+
+          NDK_PATH="/usr/local/lib/android/sdk/ndk/26.3.11579264"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "NDK_PATH=$NDK_PATH" >> $GITHUB_ENV
+
+          echo "Installed NDK versions:"
+          ls /usr/local/lib/android/sdk/ndk/
 
       - name: Download original APK
         run: |
@@ -62,7 +52,7 @@ jobs:
       - name: Build native library
         run: |
           cd jni
-          $ANDROID_NDK_HOME/ndk-build \
+          $NDK_PATH/ndk-build \
               NDK_PROJECT_PATH=. \
               APP_BUILD_SCRIPT=Android.mk \
               NDK_APPLICATION_MK=Application.mk
@@ -217,19 +207,16 @@ jobs:
 
           injection = "    invoke-static {}, Lcom/pubg/mod/Injector;->load()V\n"
 
-          # attachBaseContext
           m = re.search(r'(\.method.*attachBaseContext\(Landroid/content/Context;\)V.*?invoke-super \{p0, p1\}, Landroid/app/Application;->attachBaseContext\(Landroid/content/Context;\)V)', content, re.DOTALL)
           if m:
               content = content.replace(m.group(1), m.group(1) + injection)
               print("[+] Injected into attachBaseContext")
           else:
-              # onCreate of Application
               m = re.search(r'(\.method.*onCreate\(\)V.*?invoke-super \{p0\}, Landroid/app/Application;->onCreate\(\)V)', content, re.DOTALL)
               if m:
                   content = content.replace(m.group(1), m.group(1) + injection)
                   print("[+] Injected into Application onCreate")
               else:
-                  # Activity onCreate
                   m = re.search(r'(\.method.*onCreate\(Landroid/os/Bundle;\)V.*?invoke-super \{p0, p1\}, Landroid/app/[^;]+;->onCreate\(Landroid/os/Bundle;\)V)', content, re.DOTALL)
                   if m:
                       content = content.replace(m.group(1), m.group(1) + injection)
@@ -265,8 +252,9 @@ jobs:
             -keypass $STORE_PASS \
             -dname "CN=PMod, OU=PMod, O=PMod, L=PMod, ST=PMod, C=US"
 
-          # zipalign from build-tools
-          BT=$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)
+          BT=$(find /usr/local/lib/android/sdk/build-tools -name zipalign | head -1 | xargs dirname)
+          echo "Build tools: $BT"
+
           $BT/zipalign -v -p 4 modded_unsigned.apk modded_aligned.apk
 
           $BT/apksigner sign \
