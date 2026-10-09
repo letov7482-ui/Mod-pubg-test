@@ -18,7 +18,7 @@ namespace esp {
         bool vehicle;
         bool lootBox;
         bool grenade;
-        float maxDistance; // meters
+        float maxDistance;
     };
 
     extern Config config;
