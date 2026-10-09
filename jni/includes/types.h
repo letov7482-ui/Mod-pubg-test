@@ -71,3 +71,20 @@ struct FBox {
     u8 IsValid;
     u8 pad[7];
 };
+
+// FLinearColor — глобально, используется везде
+struct FLinearColor {
+    float R, G, B, A;
+    FLinearColor() : R(0), G(0), B(0), A(1) {}
+    FLinearColor(float r, float g, float b, float a) : R(r), G(g), B(b), A(a) {}
+
+    static FLinearColor Red()    { return {1.0f, 0.0f, 0.0f, 1.0f}; }
+    static FLinearColor Green()  { return {0.0f, 1.0f, 0.0f, 1.0f}; }
+    static FLinearColor Blue()   { return {0.0f, 0.0f, 1.0f, 1.0f}; }
+    static FLinearColor Yellow() { return {1.0f, 1.0f, 0.0f, 1.0f}; }
+    static FLinearColor White()  { return {1.0f, 1.0f, 1.0f, 1.0f}; }
+    static FLinearColor Cyan()   { return {0.0f, 1.0f, 1.0f, 1.0f}; }
+    static FLinearColor Purple() { return {0.5f, 0.0f, 0.5f, 1.0f}; }
+    static FLinearColor Orange() { return {1.0f, 0.5f, 0.0f, 1.0f}; }
+    static FLinearColor Pink()   { return {1.0f, 0.4f, 0.7f, 1.0f}; }
+};
