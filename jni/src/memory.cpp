@@ -2,6 +2,7 @@
 #include "../includes/offsets.h"
 #include <android/log.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -29,38 +30,30 @@ namespace mem {
     }
 
     bool setProt(uintptr_t addr, size_t len, int prot) {
-        uintptr_t pageStart = addr & ~(PAGE_SIZE - 1);
-        size_t pageLen = ((addr + len - 1) & ~(PAGE_SIZE - 1)) - pageStart + PAGE_SIZE;
+        long pagesize = sysconf(_SC_PAGESIZE);
+        uintptr_t pageStart = addr & ~(pagesize - 1);
+        size_t pageLen = ((addr + len - 1) & ~(pagesize - 1)) - pageStart + pagesize;
         return mprotect(reinterpret_cast<void*>(pageStart), pageLen, prot) == 0;
     }
 
     bool patch(uintptr_t addr, const char* bytes, size_t len) {
         if (!addr || !bytes || len == 0) return false;
 
-        // Save original permissions
-        long pagesize = sysconf(_SC_PAGESIZE);
-        uintptr_t pageStart = addr & ~(pagesize - 1);
-
-        // Make writable
         if (!setProt(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC)) {
-            LOGE("[-] mprotect failed at 0x%lx", addr);
+            LOGE("[-] mprotect failed at 0x%lx", (unsigned long)addr);
             return false;
         }
 
-        // Write bytes
         memcpy(reinterpret_cast<void*>(addr), bytes, len);
 
-        // Restore to read+exec
         setProt(addr, len, PROT_READ | PROT_EXEC);
 
-        // Clear instruction cache
         __builtin___clear_cache(reinterpret_cast<char*>(addr), reinterpret_cast<char*>(addr + len));
 
         return true;
     }
 
     bool nop(uintptr_t addr) {
-        // AArch64 NOP: 0x1F 0x20 0x03 0xD5
         return patch(addr, "\x1F\x20\x03\xD5", 4);
     }
 
@@ -83,8 +76,6 @@ namespace mem {
 
         LOGI("[*] Bypassing libanogs.so...");
 
-        // NOP out anti-cheat checks
-        // 1F 20 03 D5 = NOP (AArch64)
         patch(base + ANOGS_1, "\x1F\x20\x03\xD5", 4);
         patch(base + ANOGS_2, "\x00\x0A\x00\x35", 4);
         patch(base + ANOGS_3, "\x00\x01\x00\x35", 4);
@@ -95,18 +86,12 @@ namespace mem {
     }
 
     void applyPatches() {
-        // Apply all offsets patches here
         uintptr_t base = getBase("libUE4.so");
         if (base == 0) return;
 
-        // Termination fix
         nop(base + OFF_Termination_Fix_1);
         nop(base + OFF_Termination_Fix_2);
-
-        // Kill message fix
         nop(base + OFF_KillMessage);
-
-        // Fake damage fix
         patch(base + OFF_FakeDamage_Fix, "\x1F\x20\x03\xD5", 4);
     }
 
