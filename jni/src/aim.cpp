@@ -5,9 +5,11 @@
 #include "../includes/hook.h"
 #include <android/log.h>
 #include <cmath>
+#include <cstdlib>
 
 #define TAG "PMod"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 namespace aim {
 
@@ -23,7 +25,8 @@ namespace aim {
         .predictionFactor = 1.0f
     };
 
-    static void* currentTarget = nullptr;
+    void* currentTarget = nullptr;
+    tShootBulletInner origShootBulletInner = nullptr;
 
     void init() {
         LOGI("[Aimbot] Initialized");
@@ -34,26 +37,18 @@ namespace aim {
     void applyAimbotPatch(uintptr_t base) {
         if (base == 0) return;
 
-        // The Aimbot_Offset likely contains a value that controls the built-in
-        // aim assist strength. By setting it to maximum, we get a subtle but
-        // effective aim enhancement that looks natural.
-
-        // Method 1: Direct memory write to aim assist parameter
-        // This makes the game's built-in auto-aim much stronger
-        // but doesn't snap the camera (no visible aim snapping)
-
-        // Write float value 100.0f (max aim assist)
+        // Пишем float 100.0f в параметр встроенного aim assist.
+        // Игра сама подтягивает прицел — камера не дёргается.
         float aimAssistValue = 100.0f;
-        mem::write(base + OFF_Aimbot, aimAssistValue);
+        mem::write<float>(base + OFF_Aimbot, aimAssistValue);
 
-        LOGI("[Aimbot] Aim assist enhanced at 0x%lx", base + OFF_Aimbot);
+        LOGI("[Aimbot] Aim assist enhanced at 0x%lx", (unsigned long)(base + OFF_Aimbot));
     }
 
     // ── Silent aim: redirect bullet direction ──
     void applySilentAim(uintptr_t base) {
         if (base == 0 || !config.silent) return;
 
-        // Hook ShootBulletInner to redirect bullet to target's head
         void* shootBulletInner = reinterpret_cast<void*>(base + OFF_ShootBulletInner);
         if (!shootBulletInner) return;
 
@@ -85,8 +80,17 @@ namespace aim {
         void* bestActor = nullptr;
 
         u32 actorCount = 0;
-        void** actors = (void**)sdk::getActors(actorCount);
+        void** actors = sdk::getActors(actorCount);
         if (!actors) return nullptr;
+
+        // Forward vector камеры
+        float pitchRad = cameraRot.Pitch * M_PI / 180.0f;
+        float yawRad = cameraRot.Yaw * M_PI / 180.0f;
+        FVector camForward = {
+            cosf(pitchRad) * cosf(yawRad),
+            cosf(pitchRad) * sinf(yawRad),
+            sinf(pitchRad)
+        };
 
         for (u32 i = 0; i < actorCount; i++) {
             void* actor = actors[i];
@@ -97,32 +101,20 @@ namespace aim {
 
             if (config.visibleOnly && !sdk::isVisible(localPawn, actor)) continue;
 
-            // Get target bone position
             void* mesh = *(void**)((uintptr_t)actor + OFF_Actor_Mesh);
             if (!mesh) continue;
 
             FVector targetPos = sdk::getBonePosition(mesh, config.targetBone);
-            FVector2D screenPos;
+            if (targetPos.Size() < 0.01f) continue;
 
-            if (!sdk::ProjectWorldLocationToScreen(playerController, targetPos, screenPos, false))
-                continue;
-
-            // Calculate angular distance from crosshair
+            // Угловое расстояние от прицела до цели
             FVector toTarget = (targetPos - cameraLoc).Normalize();
-            FVector camForward;
-            float pitchRad = cameraRot.Pitch * M_PI / 180.0f;
-            float yawRad = cameraRot.Yaw * M_PI / 180.0f;
-            camForward = {
-                cosf(pitchRad) * cosf(yawRad),
-                cosf(pitchRad) * sinf(yawRad),
-                sinf(pitchRad)
-            };
-
-            float angle = acosf(fmaxf(-1.0f, fminf(1.0f, toTarget.Dot(camForward)))) * 180.0f / M_PI;
+            float dot = fmaxf(-1.0f, fminf(1.0f, toTarget.Dot(camForward)));
+            float angle = acosf(dot) * 180.0f / M_PI;
 
             if (angle > config.fov) continue;
 
-            // Score: prefer closest to crosshair and closest distance
+            // Скоринг: ближе к прицелу + ближе по дистанции
             float dist = sdk::getDistanceTo(localPawn, actor) / 100.0f;
             float score = angle + dist * 0.1f;
 
@@ -135,15 +127,13 @@ namespace aim {
         return bestActor;
     }
 
-    // ── Main aimbot processing (called every frame from render hook) ──
+    // ── Main aimbot processing (вызывается каждый кадр) ──
     void process() {
-        if (!config.enabled) return;
-
+        if (!config.enabled) {
+            currentTarget = nullptr;
+            return;
+        }
         currentTarget = findBestTarget();
-        // Actual aiming is handled by:
-        // 1. Enhanced aim assist (memory patch)
-        // 2. Silent aim (bullet redirect in ShootBulletInner hook)
-        // 3. Smooth camera adjustment (optional, more detectable)
     }
 
     // ── Hooked ShootBulletInner for silent aim ──
@@ -157,36 +147,32 @@ namespace aim {
         void* hitResult,
         bool isBurst)
     {
-        // Call original by default
-        // origShootBulletInner(weapon, shootDir, shootLoc, damage, headshotMul, fireInst, hitResult, isBurst);
-
         if (!config.enabled || !config.silent || !currentTarget) {
-            // Call original
             if (origShootBulletInner) {
                 origShootBulletInner(weapon, shootDir, shootLoc, damage, headshotMul, fireInst, hitResult, isBurst);
             }
             return;
         }
 
-        // Get target head position
         void* mesh = *(void**)((uintptr_t)currentTarget + OFF_Actor_Mesh);
         if (mesh) {
-            FVector targetPos = sdk::getBonePosition(mesh, BONE_HEAD);
+            FVector targetPos = sdk::getBonePosition(mesh, config.targetBone);
 
-            // Add small random offset to look natural (human-like imperfection)
-            float randX = (rand() % 200 - 100) / 10000.0f; // ±1cm
-            float randY = (rand() % 200 - 100) / 10000.0f;
-            float randZ = (rand() % 200 - 100) / 10000.0f;
-            targetPos.X += randX;
-            targetPos.Y += randY;
-            targetPos.Z += randZ;
+            if (targetPos.Size() > 0.01f) {
+                // Небольшой рандом ±1см — имитация человеческой погрешности
+                float randX = (rand() % 200 - 100) / 10000.0f;
+                float randY = (rand() % 200 - 100) / 10000.0f;
+                float randZ = (rand() % 200 - 100) / 10000.0f;
+                targetPos.X += randX;
+                targetPos.Y += randY;
+                targetPos.Z += randZ;
 
-            // Redirect bullet direction
-            FVector newDir = (targetPos - shootLoc).Normalize();
-            shootDir = newDir;
+                // Перенаправляем пулю
+                FVector newDir = (targetPos - shootLoc).Normalize();
+                shootDir = newDir;
+            }
         }
 
-        // Call original with modified direction
         if (origShootBulletInner) {
             origShootBulletInner(weapon, shootDir, shootLoc, damage, headshotMul, fireInst, hitResult, isBurst);
         }
