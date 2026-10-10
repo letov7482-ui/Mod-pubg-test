@@ -130,8 +130,28 @@ jobs:
 
       - name: Decompile APK
         run: |
-          APKTOOL_VER=2.9.3
-          wget -q "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_${APKTOOL_VER}.jar" -O apktool.jar
+          OK=0
+          for URL in \
+            "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" \
+            "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar" \
+            "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar"
+          do
+            echo "Trying: $URL"
+            if curl -L -sS --fail --connect-timeout 30 --max-time 300 -o apktool.jar "$URL"; then
+              MAGIC=$(head -c 2 apktool.jar)
+              if [ "$MAGIC" = "PK" ]; then
+                echo "OK from: $URL"
+                OK=1
+                break
+              fi
+            fi
+          done
+
+          if [ $OK -eq 0 ]; then
+            echo "::error::Failed to download apktool"
+            exit 1
+          fi
+
           ls -la apktool.jar
           java -jar apktool.jar d original.apk -o decompiled --no-res -f
           ls decompiled/
