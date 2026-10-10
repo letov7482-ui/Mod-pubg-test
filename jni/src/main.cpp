@@ -2,6 +2,7 @@
 #include "../includes/offsets.h"
 #include "../includes/memory.h"
 #include "../includes/hook.h"
+#include "../includes/bypass.h"
 #include "../includes/sdk.h"
 #include "../includes/esp.h"
 #include "../includes/aim.h"
@@ -15,53 +16,58 @@
 #define TAG "PMod"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
 static uintptr_t ue4Base = 0;
-static uintptr_t anogsBase = 0;
 static bool initialized = false;
 
-// Прототипы
 void doWork();
 void applyMiscPatches();
 
 static void* waitForLibraries(void* arg) {
-    LOGI("[*] Background thread started, waiting for libraries...");
+    LOGI("[*] Background thread started");
 
+    // 1. dlopen/sysprop/abort-хуки — СРАЗУ, до загрузки anogs
+    bypass::initEarly();
+
+    // 2. Ждём libUE4.so
     int attempts = 0;
     while (attempts < 300) {
         ue4Base = mem::getBase("libUE4.so");
         if (ue4Base != 0) {
             LOGI("[+] libUE4.so found at: 0x%lx", (unsigned long)ue4Base);
-
-            anogsBase = mem::getBase("libanogs.so");
-            if (anogsBase != 0) {
-                LOGI("[+] libanogs.so found at: 0x%lx", (unsigned long)anogsBase);
-            }
-
-            sleep(8);
-            doWork();
-            initialized = true;
-            LOGI("[+] All patches applied. Mod is active!");
             break;
         }
-        usleep(1000000);
+        usleep(200000);
         attempts++;
     }
-
-    if (!initialized) {
-        LOGE("[-] Failed to find libUE4.so after 300 attempts");
+    if (ue4Base == 0) {
+        LOGE("[-] libUE4.so not found");
+        return nullptr;
     }
 
+    // 3. Ждём пока dlopen-хук запатчит anogs до его JNI_OnLoad
+    attempts = 0;
+    while (attempts < 300 && !bypass::isAnogsReady()) {
+        usleep(200000);
+        attempts++;
+    }
+    if (bypass::isAnogsReady()) {
+        LOGI("[+] anogs pre-init patched, safe to proceed");
+    } else {
+        LOGW("[!] anogs not intercepted in time — fallback direct patch");
+        mem::bypassAnogs();
+    }
+
+    // 4. Патчи UE4 — немедленно, без sleep
+    doWork();
+    initialized = true;
+    LOGI("[+] All patches applied. Mod is active!");
     return nullptr;
 }
 
 void doWork() {
     LOGI("[*] Applying patches...");
-
-    if (anogsBase != 0) {
-        mem::bypassAnogs();
-        LOGI("[+] Anti-cheat bypassed");
-    }
 
     esp::init();
     LOGI("[+] ESP initialized");
@@ -107,73 +113,33 @@ extern "C" {
     }
 
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPEnabled(JNIEnv* env, jobject thiz, jboolean enabled) {
-        esp::config.enabled = enabled;
-    }
+    Java_com_pubg_mod_NativeBridge_setESPEnabled(JNIEnv* env, jobject thiz, jboolean v) { esp::config.enabled = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPBox(JNIEnv* env, jobject thiz, jboolean v) { esp::config.box = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPSkeleton(JNIEnv* env, jobject thiz, jboolean v) { esp::config.skeleton = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPHealthBar(JNIEnv* env, jobject thiz, jboolean v) { esp::config.healthBar = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPName(JNIEnv* env, jobject thiz, jboolean v) { esp::config.name = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPDistance(JNIEnv* env, jobject thiz, jboolean v) { esp::config.distance = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPLine(JNIEnv* env, jobject thiz, jboolean v) { esp::config.line = v; }
+    JNIEXPORT void JNICALL
+    Java_com_pubg_mod_NativeBridge_setESPMaxDistance(JNIEnv* env, jobject thiz, jfloat v) { esp::config.maxDistance = v; }
 
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setAimbotEnabled(JNIEnv* env, jobject thiz, jboolean enabled) {
-        aim::config.enabled = enabled;
-    }
-
+    Java_com_pubg_mod_NativeBridge_setAimbotEnabled(JNIEnv* env, jobject thiz, jboolean v) { aim::config.enabled = v; }
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setAimbotFOV(JNIEnv* env, jobject thiz, jfloat fov) {
-        aim::config.fov = fov;
-    }
-
+    Java_com_pubg_mod_NativeBridge_setAimbotSilent(JNIEnv* env, jobject thiz, jboolean v) { aim::config.silent = v; }
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setAimbotSmoothing(JNIEnv* env, jobject thiz, jfloat s) {
-        aim::config.smoothing = s;
-    }
-
+    Java_com_pubg_mod_NativeBridge_setAimbotVisibleOnly(JNIEnv* env, jobject thiz, jboolean v) { aim::config.visibleOnly = v; }
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setAimbotBone(JNIEnv* env, jobject thiz, jint bone) {
-        aim::config.targetBone = bone;
-    }
-
+    Java_com_pubg_mod_NativeBridge_setAimbotFOV(JNIEnv* env, jobject thiz, jfloat v) { aim::config.fov = v; }
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setAimbotSilent(JNIEnv* env, jobject thiz, jboolean silent) {
-        aim::config.silent = silent;
-    }
-
+    Java_com_pubg_mod_NativeBridge_setAimbotSmoothing(JNIEnv* env, jobject thiz, jfloat v) { aim::config.smoothing = v; }
     JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setAimbotVisibleOnly(JNIEnv* env, jobject thiz, jboolean v) {
-        aim::config.visibleOnly = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPBox(JNIEnv* env, jobject thiz, jboolean v) {
-        esp::config.box = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPSkeleton(JNIEnv* env, jobject thiz, jboolean v) {
-        esp::config.skeleton = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPHealthBar(JNIEnv* env, jobject thiz, jboolean v) {
-        esp::config.healthBar = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPName(JNIEnv* env, jobject thiz, jboolean v) {
-        esp::config.name = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPDistance(JNIEnv* env, jobject thiz, jboolean v) {
-        esp::config.distance = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPLine(JNIEnv* env, jobject thiz, jboolean v) {
-        esp::config.line = v;
-    }
-
-    JNIEXPORT void JNICALL
-    Java_com_pubg_mod_NativeBridge_setESPMaxDistance(JNIEnv* env, jobject thiz, jfloat v) {
-        esp::config.maxDistance = v;
-    }
+    Java_com_pubg_mod_NativeBridge_setAimbotBone(JNIEnv* env, jobject thiz, jint v) { aim::config.targetBone = v; }
 
 } // extern "C"
