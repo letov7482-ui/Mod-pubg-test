@@ -126,7 +126,13 @@ jobs:
               NDK_PROJECT_PATH=. \
               APP_BUILD_SCRIPT=Android.mk \
               NDK_APPLICATION_MK=Application.mk
-          ls -la libs/arm64-v8a/
+          echo "Build output:"
+          find . -name "*.so" -type f
+          # Копируем в корень для следующих шагов
+          mkdir -p ../libs
+          cp libs/arm64-v8a/libpmod.so ../libs/arm64-v8a/libpmod.so 2>/dev/null || \
+            mkdir -p ../libs/arm64-v8a && cp libs/arm64-v8a/libpmod.so ../libs/arm64-v8a/
+          ls -la ../libs/arm64-v8a/
 
       - name: Decompile APK
         run: |
@@ -161,6 +167,7 @@ jobs:
           cd decompiled
           mkdir -p lib/arm64-v8a
           cp ../libs/arm64-v8a/libpmod.so lib/arm64-v8a/
+          ls -la lib/arm64-v8a/
           mkdir -p smali/com/pubg/mod
 
           cat > smali/com/pubg/mod/NativeBridge.smali << 'SMALI_EOF'
