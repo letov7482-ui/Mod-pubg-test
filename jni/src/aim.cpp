@@ -33,26 +33,24 @@ namespace aim {
         hook::init();
     }
 
-    // ── Aim assist enhancement (built-in game feature) ──
+    // ── Усиление встроенного aim assist ──
     void applyAimbotPatch(uintptr_t base) {
         if (base == 0) return;
 
-        // Пишем float 100.0f в параметр встроенного aim assist.
-        // Игра сама подтягивает прицел — камера не дёргается.
         float aimAssistValue = 100.0f;
         mem::write<float>(base + OFF_Aimbot, aimAssistValue);
 
         LOGI("[Aimbot] Aim assist enhanced at 0x%lx", (unsigned long)(base + OFF_Aimbot));
     }
 
-    // ── Silent aim: redirect bullet direction ──
+    // ── Silent aim: перенаправление пули ──
     void applySilentAim(uintptr_t base) {
         if (base == 0 || !config.silent) return;
 
         void* shootBulletInner = reinterpret_cast<void*>(base + OFF_ShootBulletInner);
         if (!shootBulletInner) return;
 
-        bool result = hook::install(
+        bool result = hook::InlineHook::install(
             shootBulletInner,
             reinterpret_cast<void*>(&hookedShootBulletInner),
             reinterpret_cast<void**>(&origShootBulletInner)
@@ -65,7 +63,7 @@ namespace aim {
         }
     }
 
-    // ── Find best target based on FOV and visibility ──
+    // ── Поиск лучшей цели ──
     void* findBestTarget() {
         void* localPawn = sdk::getLocalPawn();
         void* playerController = sdk::getPlayerController();
@@ -83,7 +81,6 @@ namespace aim {
         void** actors = sdk::getActors(actorCount);
         if (!actors) return nullptr;
 
-        // Forward vector камеры
         float pitchRad = cameraRot.Pitch * M_PI / 180.0f;
         float yawRad = cameraRot.Yaw * M_PI / 180.0f;
         FVector camForward = {
@@ -107,15 +104,26 @@ namespace aim {
             FVector targetPos = sdk::getBonePosition(mesh, config.targetBone);
             if (targetPos.Size() < 0.01f) continue;
 
-            // Угловое расстояние от прицела до цели
             FVector toTarget = (targetPos - cameraLoc).Normalize();
             float dot = fmaxf(-1.0f, fminf(1.0f, toTarget.Dot(camForward)));
             float angle = acosf(dot) * 180.0f / M_PI;
 
             if (angle > config.fov) continue;
 
-            // Скоринг: ближе к прицелу + ближе по дистанции
-            float dist = sdk::getDistanceTo(localPawn, actor) / 100.0f;
+            // Дистанция: через указатель на игру или по координатам
+            float dist = 0.0f;
+            if (sdk::GetDistanceTo) {
+                dist = sdk::GetDistanceTo(localPawn, actor) / 100.0f;
+            } else {
+                void* rootA = *(void**)((uintptr_t)localPawn + OFF_Actor_RootComponent);
+                void* rootB = *(void**)((uintptr_t)actor + OFF_Actor_RootComponent);
+                if (rootA && rootB) {
+                    FVector posB = *(FVector*)((uintptr_t)rootB + OFF_RootComp_Location);
+                    FVector posA = *(FVector*)((uintptr_t)rootA + OFF_RootComp_Location);
+                    dist = (posB - posA).Size() / 100.0f;
+                }
+            }
+
             float score = angle + dist * 0.1f;
 
             if (score < bestScore) {
@@ -127,7 +135,6 @@ namespace aim {
         return bestActor;
     }
 
-    // ── Main aimbot processing (вызывается каждый кадр) ──
     void process() {
         if (!config.enabled) {
             currentTarget = nullptr;
@@ -136,7 +143,7 @@ namespace aim {
         currentTarget = findBestTarget();
     }
 
-    // ── Hooked ShootBulletInner for silent aim ──
+    // ── Hooked ShootBulletInner ──
     void hookedShootBulletInner(
         void* weapon,
         FVector& shootDir,
@@ -159,7 +166,7 @@ namespace aim {
             FVector targetPos = sdk::getBonePosition(mesh, config.targetBone);
 
             if (targetPos.Size() > 0.01f) {
-                // Небольшой рандом ±1см — имитация человеческой погрешности
+                // Рандом ±1см — имитация человеческой погрешности
                 float randX = (rand() % 200 - 100) / 10000.0f;
                 float randY = (rand() % 200 - 100) / 10000.0f;
                 float randZ = (rand() % 200 - 100) / 10000.0f;
@@ -167,7 +174,6 @@ namespace aim {
                 targetPos.Y += randY;
                 targetPos.Z += randZ;
 
-                // Перенаправляем пулю
                 FVector newDir = (targetPos - shootLoc).Normalize();
                 shootDir = newDir;
             }
