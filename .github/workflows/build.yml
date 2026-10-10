@@ -30,17 +30,10 @@ jobs:
       - name: Install NDK
         run: |
           SDKMGR=$(find /usr/local/lib/android/sdk -name sdkmanager -type f | head -1)
-          echo "Found sdkmanager at: $SDKMGR"
-
           yes | $SDKMGR --licenses > /dev/null 2>&1 || true
-
           $SDKMGR "ndk;26.3.11579264"
-
           NDK_PATH="/usr/local/lib/android/sdk/ndk/26.3.11579264"
-          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
           echo "NDK_PATH=$NDK_PATH" >> $GITHUB_ENV
-
-          echo "Installed NDK versions:"
           ls /usr/local/lib/android/sdk/ndk/
 
       - name: Download original APK
@@ -57,7 +50,6 @@ jobs:
               --connect-timeout 30 \
               --max-time 900 \
               -o original.bin "$url" || return 1
-
             MAGIC=$(head -c 2 original.bin)
             echo "Magic bytes: $MAGIC"
             [ "$MAGIC" = "PK" ] && return 0
@@ -91,13 +83,8 @@ jobs:
 
           if [ "$FILE_TYPE" -gt 0 ]; then
             echo "[*] XAPK/APKM detected, extracting..."
-
-            unzip -l original.bin
-
             mkdir -p xapk_extract
             unzip -o original.bin -d xapk_extract
-            ls -la xapk_extract/
-
             MAIN_APK=""
             for f in xapk_extract/*.apk; do
               if unzip -l "$f" 2>/dev/null | grep -q "lib/arm64-v8a/libUE4.so"; then
@@ -105,11 +92,9 @@ jobs:
                 break
               fi
             done
-
             if [ -z "$MAIN_APK" ]; then
               MAIN_APK=$(ls -S xapk_extract/*.apk | head -1)
             fi
-
             cp "$MAIN_APK" original.apk
             rm -rf xapk_extract
           else
@@ -126,21 +111,57 @@ jobs:
               NDK_PROJECT_PATH=. \
               APP_BUILD_SCRIPT=Android.mk \
               NDK_APPLICATION_MK=Application.mk
-          echo "Build output:"
-          find . -name "*.so" -type f
-          # Копируем в корень для следующих шагов
-          mkdir -p ../libs
-          cp libs/arm64-v8a/libpmod.so ../libs/arm64-v8a/libpmod.so 2>/dev/null || \
-            mkdir -p ../libs/arm64-v8a && cp libs/arm64-v8a/libpmod.so ../libs/arm64-v8a/
+          mkdir -p ../libs/arm64-v8a
+          cp libs/arm64-v8a/libpmod.so ../libs/arm64-v8a/
           ls -la ../libs/arm64-v8a/
+
+      - name: Compile Java menu to smali
+        run: |
+          # android.jar для компиляции
+          ANDROID_JAR=$(find /usr/local/lib/android/sdk/platforms -name "android.jar" | sort -V | tail -1)
+          echo "Using android.jar: $ANDROID_JAR"
+
+          # Компиляция Java
+          mkdir -p javac_out
+          javac --release 8 -cp "$ANDROID_JAR" -d javac_out \
+            java_src/Injector.java \
+            java_src/NativeBridge.java \
+            java_src/ModMenu.java
+          find javac_out -name "*.class"
+
+          # dex
+          BT=$(find /usr/local/lib/android/sdk/build-tools -name d8 | head -1 | xargs dirname)
+          mkdir -p dex_out
+          $BT/d8 --release --lib "$ANDROID_JAR" --min-api 26 \
+            --output dex_out javac_out/com/pubg/mod/*.class
+          ls -la dex_out/
+
+          # baksmali → smali файлы
+          BAKSMALI=""
+          for V in 3.0.5 3.0.3 3.0.2; do
+            if curl -L -sS --fail -o baksmali.jar \
+              "https://repo1.maven.org/maven2/com/android/tools/smali/baksmali/$V/baksmali-$V.jar"; then
+              BAKSMALI="baksmali.jar"
+              break
+            fi
+          done
+          [ -z "$BAKSMALI" ] && { echo "::error::baksmali download failed"; exit 1; }
+
+          mkdir -p our_smali
+          java -jar baksmali.jar d dex_out/classes.dex -o our_smali
+          find our_smali -name "*.smali"
+
+          # Сохраняем для шага инжекта
+          mkdir -p smali_staging/com/pubg/mod
+          cp our_smali/com/pubg/mod/*.smali smali_staging/com/pubg/mod/
+          ls -la smali_staging/com/pubg/mod/
 
       - name: Decompile APK
         run: |
           OK=0
           for URL in \
             "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar" \
-            "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar"
+            "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar"
           do
             echo "Trying: $URL"
             if curl -L -sS --fail --connect-timeout 30 --max-time 300 -o apktool.jar "$URL"; then
@@ -152,14 +173,12 @@ jobs:
               fi
             fi
           done
-
           if [ $OK -eq 0 ]; then
             echo "::error::Failed to download apktool"
             exit 1
           fi
 
-          ls -la apktool.jar
-          java -jar apktool.jar d original.apk -o decompiled --no-res -f
+          java -Xmx8g -jar apktool.jar d original.apk -o decompiled --no-res -f
           ls decompiled/
 
       - name: Inject Mod into APK
@@ -168,100 +187,11 @@ jobs:
           mkdir -p lib/arm64-v8a
           cp ../libs/arm64-v8a/libpmod.so lib/arm64-v8a/
           ls -la lib/arm64-v8a/
+
+          # Вшиваем наши smali-классы (меню, инжектор, bridge)
           mkdir -p smali/com/pubg/mod
-
-          cat > smali/com/pubg/mod/NativeBridge.smali << 'SMALI_EOF'
-          .class public Lcom/pubg/mod/NativeBridge;
-          .super Ljava/lang/Object;
-
-          .method public constructor <init>()V
-              .locals 0
-              invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-              return-void
-          .end method
-
-          .method public static native init()V
-          .end method
-
-          .method public static native setESPEnabled(Z)V
-          .end method
-
-          .method public static native setAimbotEnabled(Z)V
-          .end method
-
-          .method public static native setAimbotFOV(F)V
-          .end method
-
-          .method public static native setAimbotSmoothing(F)V
-          .end method
-
-          .method public static native setAimbotBone(I)V
-          .end method
-
-          .method public static native setAimbotSilent(Z)V
-          .end method
-
-          .method public static native setAimbotVisibleOnly(Z)V
-          .end method
-
-          .method public static native setESPBox(Z)V
-          .end method
-
-          .method public static native setESPSkeleton(Z)V
-          .end method
-
-          .method public static native setESPHealthBar(Z)V
-          .end method
-
-          .method public static native setESPName(Z)V
-          .end method
-
-          .method public static native setESPDistance(Z)V
-          .end method
-
-          .method public static native setESPLine(Z)V
-          .end method
-
-          .method public static native setESPMaxDistance(F)V
-          .end method
-          SMALI_EOF
-
-          cat > smali/com/pubg/mod/Injector.smali << 'SMALI_EOF'
-          .class public Lcom/pubg/mod/Injector;
-          .super Ljava/lang/Object;
-
-          .method public constructor <init>()V
-              .locals 0
-              invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-              return-void
-          .end method
-
-          .method public static load()V
-              .locals 1
-
-              :try_start_0
-              const-string v0, "pmod"
-              invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
-
-              const-string v0, "PMod"
-              const-string v1, "Native library loaded successfully"
-              invoke-static {v0, v1}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
-
-              invoke-static {}, Lcom/pubg/mod/NativeBridge;->init()V
-              :try_end_0
-              .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
-
-              return-void
-
-              :catch_0
-              move-exception v0
-              const-string v0, "PMod"
-              const-string v1, "Failed to load native library"
-              invoke-static {v0, v1}, Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I
-
-              return-void
-          .end method
-          SMALI_EOF
+          cp ../smali_staging/com/pubg/mod/*.smali smali/com/pubg/mod/
+          ls -la smali/com/pubg/mod/
 
       - name: Patch entry point
         run: |
@@ -302,7 +232,13 @@ jobs:
           with open(main_class, 'r', errors='ignore') as fh:
               content = fh.read()
 
-          injection = "    invoke-static {}, Lcom/pubg/mod/Injector;->load()V\n"
+          # Application.attachBaseContext: p1 = Context
+          # Activity.onCreate: p0 = Activity (это тоже Context)
+          injection_app = "    invoke-static {p1}, Lcom/pubg/mod/Injector;->load(Landroid/content/Context;)V\n"
+          injection_act = "    invoke-static {p0}, Lcom/pubg/mod/Injector;->load(Landroid/content/Context;)V\n"
+
+          is_app = ".super Landroid/app/Application;" in content
+          injection = injection_app if is_app else injection_act
 
           m = re.search(r'(\.method.*attachBaseContext\(Landroid/content/Context;\)V.*?invoke-super \{p0, p1\}, Landroid/app/Application;->attachBaseContext\(Landroid/content/Context;\)V)', content, re.DOTALL)
           if m:
@@ -328,7 +264,7 @@ jobs:
 
       - name: Rebuild APK
         run: |
-          java -jar apktool.jar b decompiled -o modded_unsigned.apk --use-aapt2
+          java -Xmx8g -jar apktool.jar b decompiled -o modded_unsigned.apk --use-aapt2
           ls -la modded_unsigned.apk
 
       - name: Sign APK
@@ -338,7 +274,6 @@ jobs:
           else
             export STORE_PASS="${{ inputs.keystore_pass }}"
           fi
-          echo "STORE_PASS=$STORE_PASS" >> $GITHUB_ENV
 
           keytool -genkey -v \
             -keystore signing.keystore \
@@ -350,7 +285,6 @@ jobs:
             -dname "CN=PMod, OU=PMod, O=PMod, L=PMod, ST=PMod, C=US"
 
           BT=$(find /usr/local/lib/android/sdk/build-tools -name zipalign | head -1 | xargs dirname)
-          echo "Build tools: $BT"
 
           $BT/zipalign -v -p 4 modded_unsigned.apk modded_aligned.apk
 
