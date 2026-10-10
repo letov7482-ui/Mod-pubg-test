@@ -12,6 +12,9 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <cstdarg>
+#include <sys/syscall.h>
+#include <sys/mman.h>
 
 #define TAG "PMod"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -50,7 +53,7 @@ namespace bypass {
     static volatile bool hooksReady = false;
 
     // ═══════════════════════════════════════════
-    // 1. SPEOF DEVICE FINGERPRINT
+    // 1. SPOOF DEVICE FINGERPRINT
     // ═══════════════════════════════════════════
     struct PropSpoof { const char* name; const char* value; };
     static const PropSpoof propSpoofs[] = {
@@ -92,11 +95,7 @@ namespace bypass {
 
     // ═══════════════════════════════════════════
     // 2. HIDE FROM /proc/self/maps & /proc/self/status
-    // anogs читает maps — там наша либа и патчи.
-    // Фильтруем строки: убираем libpmod.so, подменяем status.
     // ═══════════════════════════════════════════
-
-    // fd → временный файл с отфильтрованным содержимым
     struct FakeFile {
         int origFd;
         char tmpPath[64];
@@ -112,7 +111,7 @@ namespace bypass {
             || strstr(path, "/proc/self/status") != nullptr
             || strstr(path, "/proc/self/smaps") != nullptr
             || strstr(path, "/proc/self/task/") != nullptr
-            || strstr(path, "su") != nullptr;  // скрываем наличие su-путей
+            || strstr(path, "su") != nullptr;
     }
 
     static bool lineShouldHide(const char* line) {
@@ -125,25 +124,24 @@ namespace bypass {
         pthread_mutex_lock(&fakeMutex);
         if (fakeFileCount >= 16) {
             pthread_mutex_unlock(&fakeMutex);
-            return origFd;  // не хватает слотов — отдаём оригинал
+            return origFd;
         }
 
-        char tmpPath[64];
-        snprintf(tmpPath, sizeof(tmpPath), "/data/local/tmp/pmodfake_%d", fakeFileCount);
-        int tmpFd = open(tmpPath, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        // memfd_create — анонимный файл в памяти, не требует записи на диск
+        char memName[32];
+        snprintf(memName, sizeof(memName), "pmodfake_%d", fakeFileCount);
+        int tmpFd = syscall(SYS_memfd_create, memName, 0);
         if (tmpFd < 0) {
             pthread_mutex_unlock(&fakeMutex);
             return origFd;
         }
 
-        // Читаем оригинал и фильтруем
         FILE* src = fdopen(dup(origFd), "r");
         FILE* dst = fdopen(tmpFd, "w");
         if (!src || !dst) {
             if (src) fclose(src);
             if (dst) fclose(dst);
             close(tmpFd);
-            unlink(tmpPath);
             pthread_mutex_unlock(&fakeMutex);
             return origFd;
         }
@@ -155,29 +153,18 @@ namespace bypass {
             }
         }
 
-        // Special case: /proc/self/status — подменить TracerPid на 0
-        if (strstr(origPath, "/status") != nullptr) {
-            (void)0;  // уже отфильтровано выше, TracerPid у нас 0
-        }
-
         fclose(src);
         fclose(dst);
-
-        // Перемотать tmp-файл на начало
         lseek(tmpFd, 0, SEEK_SET);
 
         FakeFile& ff = fakeFiles[fakeFileCount++];
         ff.origFd = origFd;
-        strncpy(ff.tmpPath, tmpPath, sizeof(ff.tmpPath) - 1);
-        ff.tmpPath[sizeof(ff.tmpPath) - 1] = '\0';
+        ff.tmpPath[0] = '\0';
         ff.inUse = true;
 
         pthread_mutex_unlock(&fakeMutex);
-
-        // dup2 — заменить origFd на tmpFd (тот же номер fd!)
         dup2(tmpFd, origFd);
         close(tmpFd);
-
         return origFd;
     }
 
@@ -219,7 +206,6 @@ namespace bypass {
 
     // ═══════════════════════════════════════════
     // 3. GUARD: abort/raise/kill/exit
-    // Не даём anogs убить процесс.
     // ═══════════════════════════════════════════
     static bool isMainThread() {
         return gettid() == getpid();
@@ -245,7 +231,7 @@ namespace bypass {
     static int hooked_kill(pid_t pid, int sig) {
         if (pid == getpid() && (sig == SIGABRT || sig == SIGKILL || sig == SIGTERM)) {
             LOGI("[*] bypass: kill(self, %d) blocked", sig);
-            return 0;  // притворяемся успехом
+            return 0;
         }
         return orig_kill(pid, sig);
     }
@@ -345,7 +331,6 @@ namespace bypass {
                     mem::write<float>(ue4 + OFF_Aimbot, 100.0f);
             }
 
-            // Каждые 30 сек — лог heartbeat (для отладки в logcat)
             if (cycle % 10 == 0) {
                 LOGI("[*] watchdog: cycle %d, anogs=%p, ue4=%p",
                      cycle, (void*)anogs, (void*)ue4);
@@ -355,9 +340,7 @@ namespace bypass {
     }
 
     // ═══════════════════════════════════════════
-    // 5. MONITOR NEW THREADS
-    // anogs плодит потоки для скана. Мы помечаем их.
-    // Полная блокировка сломает игру, но лог даёт visibility.
+    // 5. THREAD MONITOR
     // ═══════════════════════════════════════════
     struct ThreadArgs { void* (*fn)(void*); void* arg; };
     static void* threadTrampoline(void* p) {
@@ -369,7 +352,6 @@ namespace bypass {
     }
 
     static int hooked_pthread_create(pthread_t* thread, const void* attr, void* (*start)(void*), void* arg) {
-        // Просто проксируем — точка расширения для будущего анализа
         return orig_pthread_create(thread, attr, start, arg);
     }
 
@@ -379,24 +361,20 @@ namespace bypass {
     void initEarly() {
         LOGI("[*] bypass: installing full early hooks");
 
-        // 1. dlopen — перехват загрузки anogs
         void* sym;
         sym = dlsym(RTLD_DEFAULT, "dlopen");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_dlopen, (void**)&orig_dlopen);
         sym = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_android_dlopen_ext, (void**)&orig_android_dlopen_ext);
 
-        // 2. sysprop — device spoof
         sym = dlsym(RTLD_DEFAULT, "__system_property_get");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_sysprop, (void**)&orig_sysprop);
 
-        // 3. open/openat — фильтр /proc/self/maps, status, smaps
         sym = dlsym(RTLD_DEFAULT, "open");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_open, (void**)&orig_open);
         sym = dlsym(RTLD_DEFAULT, "openat");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_openat, (void**)&orig_openat);
 
-        // 4. abort/raise/kill/pthread_kill/exit — guard
         sym = dlsym(RTLD_DEFAULT, "abort");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_abort, (void**)&orig_abort);
         sym = dlsym(RTLD_DEFAULT, "raise");
@@ -408,11 +386,9 @@ namespace bypass {
         sym = dlsym(RTLD_DEFAULT, "exit");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_exit, (void**)&orig_exit);
 
-        // 5. pthread_create — мониторинг
         sym = dlsym(RTLD_DEFAULT, "pthread_create");
         if (sym) hook::InlineHook::install(sym, (void*)&hooked_pthread_create, (void**)&orig_pthread_create);
 
-        // 6. Watchdog
         pthread_t wd;
         pthread_create(&wd, nullptr, watchdogThread, nullptr);
         pthread_detach(wd);
