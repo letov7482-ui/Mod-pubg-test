@@ -14,7 +14,7 @@
 
 namespace sdk {
 
-    // ── Resolved function pointers ──
+    // ── Function pointers ──
     tProjectWorldLocationToScreen ProjectWorldLocationToScreen = nullptr;
     tLineOfSightTo LineOfSightTo = nullptr;
     tGetBonePosWithRotation GetBonePos = nullptr;
@@ -30,7 +30,6 @@ namespace sdk {
         base = ue4Base;
         if (base == 0) return false;
 
-        // Resolve function pointers from offsets
         ProjectWorldLocationToScreen = (tProjectWorldLocationToScreen)(base + OFF_ProjectWorldToScreen);
         LineOfSightTo = (tLineOfSightTo)(base + OFF_LineOfSightTo);
         GetBonePos = (tGetBonePosWithRotation)(base + OFF_GetBonePos);
@@ -52,10 +51,6 @@ namespace sdk {
     void* getLocalPlayer() {
         void* gWorld = getGWorld();
         if (!gWorld) return nullptr;
-
-        // Navigate: GWorld -> Levels -> Actors -> PlayerController -> LocalPlayer
-        // This depends on the specific UE4 version and PUBG Mobile's structure
-        // Simplified: read from known offset
         return *(void**)(base + OFF_GWorld + OFF_Actor_LocalPlayers);
     }
 
@@ -78,8 +73,6 @@ namespace sdk {
     }
 
     void* getCanvas() {
-        // Canvas is obtained during PostRender callback
-        // We'll cache it from the hook
         static void* canvas = nullptr;
         return canvas;
     }
@@ -90,30 +83,19 @@ namespace sdk {
         return *(void**)((uintptr_t)gWorld + 0x0038); // PersistentLevel
     }
 
-    void* getActors(u32& count) {
+    void** getActors(u32& count) {
+        count = 0;
         void* level = getLevel();
-        if (!level) { count = 0; return nullptr; }
+        if (!level) return nullptr;
 
-        // TArray<AActor*>
-        void** actors = *(void***)((uintptr_t)level + 0x00A0); // Actors array
-        count = *(u32*)((uintptr_t)level + 0x00A8); // Array count
+        void** actors = *(void***)((uintptr_t)level + 0x00A0);
+        count = *(u32*)((uintptr_t)level + 0x00A8);
 
         return actors;
     }
 
     bool isPlayer(void* actor) {
         if (!actor) return false;
-        void* actorClass = *(void**)((uintptr_t)actor + OFF_ObjectClass);
-        if (!actorClass) return false;
-
-        // Check class name contains "PlayerPawn" or similar
-        // We need to read the class FName
-        void* className = *(void**)((uintptr_t)actorClass + OFF_ObjectName);
-        if (!className) return false;
-
-        // Compare FName index to known player class
-        // This is simplified - in practice we'd have a proper name lookup
-        // For PUBG Mobile, check if it's a character with a mesh
         void* mesh = *(void**)((uintptr_t)actor + OFF_Actor_Mesh);
         return mesh != nullptr;
     }
@@ -143,9 +125,6 @@ namespace sdk {
 
     FVector getBonePosition(void* mesh, int boneIndex) {
         if (!mesh || !GetBonePos) return FVector();
-
-        // GetBonePosWithRotation is typically a static function
-        // that takes mesh and bone index
         return GetBonePos(mesh, boneIndex);
     }
 
@@ -168,8 +147,6 @@ namespace sdk {
 
     const wchar_t* getPlayerName(void* playerState) {
         if (!playerState) return L"Unknown";
-        // Read player name from PlayerState
-        // Offset depends on PUBG Mobile version
         return (const wchar_t*)(*(uintptr_t*)((uintptr_t)playerState + 0x03A0));
     }
 
