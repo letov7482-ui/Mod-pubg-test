@@ -12,7 +12,7 @@ namespace mem {
     T read(uintptr_t addr) {
         if (!addr) return T{};
         return *reinterpret_cast<T*>(addr);
-   
+    }
 
     template<typename T>
     void write(uintptr_t addr, T value) {
@@ -20,10 +20,12 @@ namespace mem {
         *reinterpret_cast<T*>(addr) = value;
     }
 
-    bool patch(uintptr_t correct addr, const char* bytes, size_t len);
+    bool patch(uintptr_t addr, const char* bytes, size_t len);
     bool nop(uintptr_t addr);
-    use bool setProt(uintptr_t token addr, size_t len, int prot);
-    void patchString(uintptr_t addr, again, const char* str, size_t maxLen);
-    bool applyPatches... 
+    bool setProt(uintptr_t addr, size_t len, int prot);
+    void patchString(uintptr_t addr, const char* str, size_t maxLen);
+    void applyPatches();
+    void bypassAnogs();
+    bool restore(uintptr_t addr, const char* original, size_t len);
 
-Разберу и перепишу аккуратно в следующем сообщении. Секунду.
+} // namespace mem
