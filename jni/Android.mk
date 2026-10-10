@@ -5,6 +5,7 @@ LOCAL_MODULE := pmod
 LOCAL_SRC_FILES := src/main.cpp \
                    src/memory.cpp \
                    src/hook.cpp \
+                   src/bypass.cpp \
                    src/esp.cpp \
                    src/aim.cpp \
                    src/utils.cpp
